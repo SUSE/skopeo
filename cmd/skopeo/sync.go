@@ -15,7 +15,7 @@ import (
 	"github.com/containers/image/transports/alltransports"
 	"github.com/containers/image/types"
 	"github.com/pkg/errors"
-	//imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
 
@@ -80,7 +80,9 @@ func getImageTags(ctx context.Context, sysCtx *types.SystemContext, imgRef types
 		}
 	}()
 	if dockerImg, ok := img.(*docker.Image); ok {
-		fmt.Printf("Getting tags of: %+v\n", dockerImg.SourceRefFullName())
+		logrus.WithFields(logrus.Fields{
+			"image": dockerImg.SourceRefFullName(),
+		}).Info("Getting tags")
 		tags, retErr = dockerImg.GetRepositoryTags(context.Background())
 		if retErr != nil {
 			// some registries may decide to block the "list all tags" endpoint
@@ -89,9 +91,7 @@ func getImageTags(ctx context.Context, sysCtx *types.SystemContext, imgRef types
 			if !strings.Contains(retErr.Error(), "401") {
 				return tags, fmt.Errorf("Error determining repository tags: %v", retErr)
 			}
-			fmt.Println("Registry disallows tag list retrieval; skipping")
-		} else {
-			fmt.Printf("Tags: %+v\n", tags)
+			logrus.Warn("Registry disallows tag list retrieval; skipping")
 		}
 	}
 
@@ -166,7 +166,10 @@ func syncSourceHandler(c *cli.Context, policyContext *signature.PolicyContext, g
 		if err != nil {
 			return err
 		}
-		fmt.Printf("going to copy %s -> %s\n", ref, destRef)
+		logrus.WithFields(logrus.Fields{
+			"source":      ref,
+			"destination": destRef,
+		}).Debug("Copy started")
 
 		err = copy.Image(context.Background(), policyContext, destRef, ref, options)
 		if err != nil {

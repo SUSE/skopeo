@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"io"
+	"io/ioutil"
 	"strings"
 
 	"github.com/containers/image/transports/alltransports"
 	"github.com/containers/image/types"
+	"github.com/pkg/errors"
 	"github.com/urfave/cli"
+	"gopkg.in/yaml.v2"
 )
 
 // errorShouldDisplayUsage is a subtype of error used by command handlers to indicate that cli.ShowSubcommandHelp should be called.
@@ -231,4 +234,16 @@ func parseImageSource(ctx context.Context, opts *imageOptions, name string) (typ
 		return nil, err
 	}
 	return ref.NewImageSource(ctx, sys)
+}
+
+func yamlUnmarshal(yamlFile string, cfg interface{}) error {
+	source, err := ioutil.ReadFile(yamlFile)
+	if err != nil {
+		return err
+	}
+	err = yaml.Unmarshal(source, cfg)
+	if err != nil {
+		return errors.WithMessage(err, fmt.Sprintf("cannot unmarshal %s", yamlFile))
+	}
+	return nil
 }

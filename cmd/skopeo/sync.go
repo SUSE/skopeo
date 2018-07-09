@@ -25,6 +25,21 @@ type imagesBySource struct {
 	SourceCtx        *types.SystemContext
 }
 
+type registrySyncCfg struct {
+	Images      map[string][]string
+	Credentials types.DockerAuthConfig
+	TlsVerify   bool   `yaml:"tls-verify"`
+	CertDir     string `yaml:"cert-dir"`
+}
+
+type sourceCfg map[string]registrySyncCfg
+
+func newSourceConfig(yamlFile string) (cfg sourceCfg, err error) {
+
+	err = YamlUnmarshal(yamlFile, &cfg)
+	return
+}
+
 func isValidTransport(transport types.ImageTransport) (bool, error) {
 	dockerTransport := transports.Get("docker")
 	if dockerTransport == nil {
@@ -240,6 +255,86 @@ func syncSourceHandler(c *cli.Context, globalDestRef types.ImageReference) (toCo
 	return
 }
 
+func syncSourceFileHandler(c *cli.Context) (toCopyList []imagesBySource, err error) {
+	cfg, err := newSourceConfig(c.String("source-file"))
+	if err != nil {
+		return
+	}
+
+	for domain, domainCfg := range cfg {
+		logrus.WithFields(logrus.Fields{
+			"domain": domain,
+		}).Info("Processing all images from domain")
+
+		for imageName, tags := range domainCfg.Images {
+			baseImage := fmt.Sprintf("docker://%s", filepath.Join(domain, imageName))
+			logrus.WithFields(logrus.Fields{
+				"image": baseImage,
+			}).Info("Processing image")
+
+			sourceCtx, err := contextFromGlobalOptions(c, "src-")
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"image": baseImage,
+				}).Error("Error getting source context, skipping")
+				logrus.Debug(err)
+				continue
+			}
+			// override ctx with per-domain options
+			sourceCtx.DockerCertPath = domainCfg.CertDir
+			sourceCtx.DockerDaemonCertPath = domainCfg.CertDir
+			sourceCtx.DockerDaemonInsecureSkipTLSVerify = !domainCfg.TlsVerify
+			sourceCtx.DockerInsecureSkipTLSVerify = !domainCfg.TlsVerify
+			sourceCtx.DockerAuthConfig = &domainCfg.Credentials
+
+			var sourceReferences []types.ImageReference
+			for _, tag := range tags {
+				source := fmt.Sprintf("%s:%s", baseImage, tag)
+
+				imageRef, err := getImageReference(source)
+				if err != nil {
+					logrus.WithFields(logrus.Fields{
+						"tag": source,
+					}).Error("Error processing tag, skipping")
+					logrus.Debugf("Error getting image reference: %s", err)
+					continue
+				}
+				sourceReferences = append(sourceReferences, imageRef)
+			}
+
+			if len(tags) == 0 {
+				imageRef, err := getImageReference(baseImage)
+				if err != nil {
+					logrus.WithFields(logrus.Fields{
+						"image": baseImage,
+					}).Error("Error processing image, skipping")
+					logrus.Debug(err)
+					continue
+				}
+				logrus.WithFields(logrus.Fields{
+					"image": baseImage,
+				}).Info("No tags given, querying registry")
+
+				sourceReferences, err = imagesToCopyFromRegistry(imageRef, baseImage, sourceCtx)
+				if err != nil {
+					logrus.WithFields(logrus.Fields{
+						"image": baseImage,
+					}).Error("Error processing image, skipping")
+					logrus.Debug(err)
+					continue
+				}
+			}
+
+			toCopyList = append(toCopyList, imagesBySource{
+				RootSrcRef:       nil,
+				SourceReferences: sourceReferences,
+				SourceCtx:        sourceCtx})
+		}
+	}
+
+	return
+}
+
 func syncHandler(c *cli.Context) (retErr error) {
 	if len(c.Args()) != 1 {
 		cli.ShowCommandHelp(c, "sync")
@@ -277,16 +372,22 @@ func syncHandler(c *cli.Context) (retErr error) {
 	//TODO: should we assume that's our default manifest type?
 	manifestType := manifest.DockerV2Schema2MediaType
 
-	toCopy := imagesBySource{}
+	var toCopyList []imagesBySource
 
 	if c.IsSet("source") {
-		toCopy, err = syncSourceHandler(c, destRef)
+		toCopy, err := syncSourceHandler(c, destRef)
+		if err != nil {
+			return err
+		}
+		toCopyList = append(toCopyList, toCopy)
+	} else {
+		toCopyList, err = syncSourceFileHandler(c)
 		if err != nil {
 			return err
 		}
 	}
 
-	for counter, ref := range toCopy.SourceReferences {
+	for _, toCopy := range toCopyList {
 		options := copy.Options{
 			RemoveSignatures:      removeSignatures,
 			SignBy:                signBy,
@@ -296,21 +397,25 @@ func syncHandler(c *cli.Context) (retErr error) {
 			SourceCtx:             toCopy.SourceCtx,
 		}
 
-		fmt.Printf("Processing image %d/%d\n",
-			counter+1,
-			len(toCopy.SourceReferences))
-		destRef, err := buildFinalDestination(toCopy.RootSrcRef, ref, c.Args()[0])
-		if err != nil {
-			return err
-		}
-		logrus.WithFields(logrus.Fields{
-			"source":      ref,
-			"destination": destRef,
-		}).Info("Copy started")
+		for counter, ref := range toCopy.SourceReferences {
+			logrus.WithFields(logrus.Fields{"image": ref.DockerReference().Name()}).Infof(
+				"Processing tag %d/%d", counter+1, len(toCopy.SourceReferences))
+			destRef, err := buildFinalDestination(toCopy.RootSrcRef, ref, c.Args()[0])
+			if err != nil {
+				return err
+			}
+			logrus.WithFields(logrus.Fields{
+				"source":      ref,
+				"destination": destRef,
+			}).Info("Copy started")
 
-		err = copy.Image(context.Background(), policyContext, destRef, ref, &options)
-		if err != nil {
-			return err
+			err = copy.Image(context.Background(), policyContext, destRef, ref, &options)
+			if err != nil {
+				logrus.WithFields(logrus.Fields{"image": ref.DockerReference().Name()}).Error(
+					"Error copying tag, skipping")
+				logrus.Debug(err)
+				continue
+			}
 		}
 	}
 
@@ -331,13 +436,16 @@ var syncCmd = cli.Command{
 	(eg: docker://docker.io/busybox) or a local directory
 	(eg: dir:///media/usb/).
 
+	SOURCE-FILE is a YAML file with a set of source images from different
+	docker registry. Local directory are not supported.
+
 	Skopeo sync will copy all the tags of an image when SOURCE uses the
 	'docker://' transport and no tag is specified.
 
 	DESTINATION can be either a docker registry
 	(eg: docker://my-registry.local.lan) or a local directory
 	(eg: dir:///media/usb).
-	
+
 	When DESTINATION is a local directory one directory per 'image:tag' is going
 	to be created.
 	`),

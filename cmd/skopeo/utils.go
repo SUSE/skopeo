@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"gopkg.in/yaml.v2"
+	"io/ioutil"
 	"strings"
 
 	"github.com/containers/image/transports/alltransports"
@@ -92,4 +94,16 @@ func parseImageSource(ctx context.Context, c *cli.Context, name string) (types.I
 		return nil, err
 	}
 	return ref.NewImageSource(ctx, sys)
+}
+
+func YamlUnmarshal(yamlFile string, cfg interface{}) error {
+	source, err := ioutil.ReadFile(yamlFile)
+	if err != nil {
+		return err
+	}
+	err = yaml.Unmarshal(source, cfg)
+	if err != nil {
+		return err
+	}
+	return nil
 }

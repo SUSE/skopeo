@@ -142,6 +142,10 @@ func syncSourceHandler(c *cli.Context, policyContext *signature.PolicyContext, g
 		return fmt.Errorf("Error while parsing source: %v", err)
 	}
 
+	if globalDestRef.Transport() == srcRef.Transport() && srcRef.Transport() == transports.Get("dir") {
+		return fmt.Errorf("Sync from 'dir://' to 'dir://' not implemented, use something like rsync instead.")
+	}
+
 	sourceCtx, err := contextFromGlobalOptions(c, "src-")
 	if err != nil {
 		return err

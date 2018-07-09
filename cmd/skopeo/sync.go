@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/containers/image/copy"
@@ -25,14 +26,14 @@ func isValidTransport(transport types.ImageTransport) (bool, error) {
 		return false, fmt.Errorf("Cannot find 'docker' transport type")
 	}
 
-	dockerArchiveTransport := transports.Get("docker-archive")
-	if dockerArchiveTransport == nil {
-		return false, fmt.Errorf("Cannot find 'docker-archive' transport type")
+	dirTransport := transports.Get("dir")
+	if dirTransport == nil {
+		return false, fmt.Errorf("Cannot find 'dir' transport type")
 	}
 
 	validTransports := []types.ImageTransport{
 		dockerTransport,
-		dockerArchiveTransport,
+		dirTransport,
 	}
 
 	for _, vt := range validTransports {
@@ -63,10 +64,30 @@ func getImageReference(imgName string) (types.ImageReference, error) {
 // Builds the final destination of the image:
 // eg: given destination `docker://my-registry.local.lan` and src `docker://docker.io/busybox:stable`
 // the final destination is going to be docker://my-registry.local.lan/docker.io/busybox:
-func buildFinalDestination(srcRef types.ImageReference, globalDest string) (destRef types.ImageReference, err error) {
-	dst := fmt.Sprintf("%s/%s", globalDest, srcRef.DockerReference())
+func buildFinalDestination(srcRef types.ImageReference, globalDest string) (types.ImageReference, error) {
+	dest := fmt.Sprintf("%s/%s", globalDest, srcRef.DockerReference())
 
-	return getImageReference(dst)
+	if strings.HasPrefix(dest, "dir:") {
+		// the final directory holding the image must exist otherwise
+		// the directory ImageReference instance won't be created
+		tgtDir := filepath.Dir(strings.TrimPrefix(dest, "dir:"))
+
+		if _, err := os.Stat(tgtDir); err != nil {
+			if os.IsNotExist(err) {
+				if err := os.MkdirAll(tgtDir, 0755); err != nil {
+					return nil, fmt.Errorf("Error creating directory for image %s: %v",
+						tgtDir,
+						err)
+				}
+			} else {
+				return nil, fmt.Errorf("Error while checking existance of directory %s: %v",
+					tgtDir,
+					err)
+			}
+		}
+	}
+
+	return getImageReference(dest)
 }
 
 func getImageTags(ctx context.Context, sysCtx *types.SystemContext, imgRef types.ImageReference) (tags []string, retErr error) {

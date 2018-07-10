@@ -329,16 +329,17 @@ var syncCmd = cli.Command{
 
 	SOURCE can be either a repository hosted on a docker registry
 	(eg: docker://docker.io/busybox) or a local directory
-	(eg: dir:///media/usb/). Note well: no image tag has to be specified when
-	SOURCE is referencing a hosted repository.
+	(eg: dir:///media/usb/).
 
-	When SOURCE is a repository hosted on a docker registry all the
-	tags of the repository are going to be copied into DESTINATION.
+	Skopeo sync will copy all the tags of an image when SOURCE uses the
+	'docker://' transport and no tag is specified.
 
 	DESTINATION can be either a docker registry
 	(eg: docker://my-registry.local.lan) or a local directory
-	(eg: dir:///media/usb). When DESTINATION is a local directory one
-	file per image is going to be created.
+	(eg: dir:///media/usb).
+	
+	When DESTINATION is a local directory one directory per 'image:tag' is going
+	to be created.
 	`),
 	ArgsUsage: "[--source SOURCE] [--source-file SOURCE-FILE] DESTINATION",
 	Action:    syncHandler,

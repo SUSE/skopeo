@@ -11,7 +11,6 @@ import (
 	"github.com/containers/image/docker"
 	"github.com/containers/image/docker/reference"
 	"github.com/containers/image/manifest"
-	"github.com/containers/image/signature"
 	"github.com/containers/image/transports"
 	"github.com/containers/image/transports/alltransports"
 	"github.com/containers/image/types"
@@ -19,6 +18,11 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
+
+type imagesBySource struct {
+	SourceReferences []types.ImageReference
+	SourceCtx        *types.SystemContext
+}
 
 func isValidTransport(transport types.ImageTransport) (bool, error) {
 	dockerTransport := transports.Get("docker")
@@ -136,73 +140,62 @@ func isTagSpecified(image string) (bool, error) {
 	// was specified by the user
 	return !strings.HasSuffix(reference.TagNameOnly(normName).String(), ":latest"), nil
 }
-func syncSourceHandler(c *cli.Context, policyContext *signature.PolicyContext, globalDestRef types.ImageReference, options *copy.Options) (retErr error) {
-	srcRef, err := getImageReference(c.String("source"))
+
+func imagesToCopyFromRegistry(srcRef types.ImageReference, src string, sourceCtx *types.SystemContext) (sourceReferences []types.ImageReference, retErr error) {
+	imageTagged, err := isTagSpecified(strings.TrimPrefix(src, "docker://"))
 	if err != nil {
-		return fmt.Errorf("Error while parsing source: %v", err)
-	}
-
-	if globalDestRef.Transport() == srcRef.Transport() && srcRef.Transport() == transports.Get("dir") {
-		return fmt.Errorf("Sync from 'dir://' to 'dir://' not implemented, use something like rsync instead.")
-	}
-
-	sourceCtx, err := contextFromGlobalOptions(c, "src-")
-	if err != nil {
-		return err
-	}
-	options.SourceCtx = sourceCtx
-
-	if srcRef.Transport() != transports.Get("docker") {
-		// TODO: handle dir transport
-		return nil
-	}
-
-	sourceReferences := []types.ImageReference{}
-	imageTagged, err := isTagSpecified(strings.TrimPrefix(c.String("source"), "docker://"))
-	if err != nil {
-		return err
+		return sourceReferences, err
 	}
 	if imageTagged {
 		sourceReferences = append(sourceReferences, srcRef)
 	} else {
 		tags, err := getImageTags(context.Background(), sourceCtx, srcRef)
 		if err != nil {
-			return fmt.Errorf("Error while retrieving available tags of %s: %v",
-				c.String("source"),
-				err)
+			return []types.ImageReference{},
+				fmt.Errorf(
+					"Error while retrieving available tags of %s: %v",
+					src,
+					err)
 		}
 		for _, tag := range tags {
-			imageAndTag := fmt.Sprintf("%s:%s", c.String("source"), tag)
+			imageAndTag := fmt.Sprintf("%s:%s", src, tag)
 			ref, err := getImageReference(imageAndTag)
 			if err != nil {
-				return fmt.Errorf("Error while building reference of %s: %v",
-					imageAndTag,
-					err)
+				return []types.ImageReference{},
+					fmt.Errorf("Error while building reference of %s: %v",
+						imageAndTag,
+						err)
 			}
 			sourceReferences = append(sourceReferences, ref)
 		}
 	}
+	return
+}
 
-	for counter, ref := range sourceReferences {
-		fmt.Printf("Processing image %d/%d\n",
-			counter+1,
-			len(sourceReferences))
-		destRef, err := buildFinalDestination(ref, c.Args()[0])
-		if err != nil {
-			return err
-		}
-		logrus.WithFields(logrus.Fields{
-			"source":      ref,
-			"destination": destRef,
-		}).Debug("Copy started")
-
-		err = copy.Image(context.Background(), policyContext, destRef, ref, options)
-		if err != nil {
-			return err
-		}
+func syncSourceHandler(c *cli.Context, globalDestRef types.ImageReference) (toCopy imagesBySource, retErr error) {
+	srcRef, err := getImageReference(c.String("source"))
+	if err != nil {
+		return toCopy, fmt.Errorf("Error while parsing source: %v", err)
 	}
 
-	return nil
+	if globalDestRef.Transport() == srcRef.Transport() && srcRef.Transport() == transports.Get("dir") {
+		return toCopy,
+			fmt.Errorf("Sync from 'dir://' to 'dir://' not implemented, use something like rsync instead.")
+	}
+
+	sourceCtx, err := contextFromGlobalOptions(c, "src-")
+	if err != nil {
+		return toCopy, err
+	}
+	toCopy.SourceCtx = sourceCtx
+
+	if srcRef.Transport() == transports.Get("docker") {
+		toCopy.SourceReferences, retErr = imagesToCopyFromRegistry(srcRef, c.String("source"), sourceCtx)
+	} else {
+		// TODO: handle dir transport
+	}
+
+	return
 }
 
 func syncHandler(c *cli.Context) (retErr error) {
@@ -242,22 +235,43 @@ func syncHandler(c *cli.Context) (retErr error) {
 	//TODO: should we assume that's our default manifest type?
 	manifestType := manifest.DockerV2Schema2MediaType
 
-	copyOptions := copy.Options{
-		RemoveSignatures:      removeSignatures,
-		SignBy:                signBy,
-		ReportWriter:          os.Stdout,
-		DestinationCtx:        destinationCtx,
-		ForceManifestMIMEType: manifestType,
-	}
+	toCopy := imagesBySource{}
 
 	if c.IsSet("source") {
-		return syncSourceHandler(
-			c,
-			policyContext,
-			destRef,
-			&copyOptions,
-		)
+		toCopy, err = syncSourceHandler(c, destRef)
+		if err != nil {
+			return err
+		}
 	}
+
+	for counter, ref := range toCopy.SourceReferences {
+		options := copy.Options{
+			RemoveSignatures:      removeSignatures,
+			SignBy:                signBy,
+			ReportWriter:          os.Stdout,
+			DestinationCtx:        destinationCtx,
+			ForceManifestMIMEType: manifestType,
+			SourceCtx:             toCopy.SourceCtx,
+		}
+
+		fmt.Printf("Processing image %d/%d\n",
+			counter+1,
+			len(toCopy.SourceReferences))
+		destRef, err := buildFinalDestination(ref, c.Args()[0])
+		if err != nil {
+			return err
+		}
+		logrus.WithFields(logrus.Fields{
+			"source":      ref,
+			"destination": destRef,
+		}).Debug("Copy started")
+
+		err = copy.Image(context.Background(), policyContext, destRef, ref, &options)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

@@ -20,6 +20,7 @@ import (
 )
 
 type imagesBySource struct {
+	RootSrcRef       types.ImageReference
 	SourceReferences []types.ImageReference
 	SourceCtx        *types.SystemContext
 }
@@ -68,8 +69,21 @@ func getImageReference(imgName string) (types.ImageReference, error) {
 // Builds the final destination of the image:
 // eg: given destination `docker://my-registry.local.lan` and src `docker://docker.io/busybox:stable`
 // the final destination is going to be docker://my-registry.local.lan/docker.io/busybox:
-func buildFinalDestination(srcRef types.ImageReference, globalDest string) (types.ImageReference, error) {
-	dest := fmt.Sprintf("%s/%s", globalDest, srcRef.DockerReference())
+func buildFinalDestination(rootSrc, srcRef types.ImageReference, globalDest string) (types.ImageReference, error) {
+	var dest string
+
+	if srcRef.Transport() == transports.Get("docker") {
+		dest = fmt.Sprintf("%s/%s", globalDest, srcRef.DockerReference())
+	} else {
+		// It's `dir` transport. In that case`globalDest` uses the `docker://` transport because
+		// we don't allow `dir` -> `dir` sync operations.
+		relPath := strings.TrimPrefix(srcRef.StringWithinTransport(), rootSrc.StringWithinTransport())
+		// we cannot use `filepath.Join` against a "vanilla" globalDest because it will change
+		// `docker://` into `docker:/` breaking the reference validations later on
+		dest = fmt.Sprintf(
+			"docker://%s",
+			filepath.Join(strings.TrimPrefix(globalDest, "docker://"), relPath))
+	}
 
 	if strings.HasPrefix(dest, "dir:") {
 		// the final directory holding the image must exist otherwise
@@ -172,11 +186,39 @@ func imagesToCopyFromRegistry(srcRef types.ImageReference, src string, sourceCtx
 	return
 }
 
+func imagesToCopyFromDir(srcRef types.ImageReference) (sourceReferences []types.ImageReference, retErr error) {
+	err := filepath.Walk(srcRef.StringWithinTransport(), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && info.Name() == "manifest.json" {
+			ref, err := getImageReference(fmt.Sprintf("dir:%s", filepath.Dir(path)))
+			if err != nil {
+				return fmt.Errorf(
+					"Error while creating image referenced for path %s: %v",
+					filepath.Dir(path),
+					err)
+			}
+			sourceReferences = append(sourceReferences, ref)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+
+	if err != nil {
+		return []types.ImageReference{},
+			fmt.Errorf("Error walking the path %q: %v\n", srcRef.StringWithinTransport(), err)
+	}
+
+	return
+}
+
 func syncSourceHandler(c *cli.Context, globalDestRef types.ImageReference) (toCopy imagesBySource, retErr error) {
 	srcRef, err := getImageReference(c.String("source"))
 	if err != nil {
 		return toCopy, fmt.Errorf("Error while parsing source: %v", err)
 	}
+	toCopy.RootSrcRef = srcRef
 
 	if globalDestRef.Transport() == srcRef.Transport() && srcRef.Transport() == transports.Get("dir") {
 		return toCopy,
@@ -192,7 +234,7 @@ func syncSourceHandler(c *cli.Context, globalDestRef types.ImageReference) (toCo
 	if srcRef.Transport() == transports.Get("docker") {
 		toCopy.SourceReferences, retErr = imagesToCopyFromRegistry(srcRef, c.String("source"), sourceCtx)
 	} else {
-		// TODO: handle dir transport
+		toCopy.SourceReferences, retErr = imagesToCopyFromDir(srcRef)
 	}
 
 	return
@@ -257,14 +299,14 @@ func syncHandler(c *cli.Context) (retErr error) {
 		fmt.Printf("Processing image %d/%d\n",
 			counter+1,
 			len(toCopy.SourceReferences))
-		destRef, err := buildFinalDestination(ref, c.Args()[0])
+		destRef, err := buildFinalDestination(toCopy.RootSrcRef, ref, c.Args()[0])
 		if err != nil {
 			return err
 		}
 		logrus.WithFields(logrus.Fields{
 			"source":      ref,
 			"destination": destRef,
-		}).Debug("Copy started")
+		}).Info("Copy started")
 
 		err = copy.Image(context.Background(), policyContext, destRef, ref, &options)
 		if err != nil {

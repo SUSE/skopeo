@@ -92,6 +92,7 @@ func createApp() (*cli.App, *globalOptions) {
 		deleteCmd(&opts),
 		manifestDigestCmd(),
 		syncCmd(&opts),
+    registrySyncCmd(&opts),
 		standaloneSignCmd(),
 		standaloneVerifyCmd(),
 		untrustedSignatureDumpCmd(),

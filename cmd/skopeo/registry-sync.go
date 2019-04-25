@@ -1,7 +1,7 @@
 package main
 
 import (
-	//"context"
+	"context"
 	"fmt"
 	"io"
 	"net/url"
@@ -9,6 +9,9 @@ import (
 	"path"
 	//"path/filepath"
 	"strings"
+	"runtime"
+	"time"
+	"math"
 
 	"github.com/containers/image/copy"
 	"github.com/containers/image/directory"
@@ -16,10 +19,13 @@ import (
 	//"github.com/containers/image/docker/reference"
 	"github.com/containers/image/transports"
 	"github.com/containers/image/types"
+	"github.com/containers/image/signature"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
+
+var MAX_THREADS int = int( math.Min(float64(runtime.NumCPU()), 4.0))
 
 type registrySyncOptions struct {
 	global            *globalOptions
@@ -330,13 +336,87 @@ func registrySyncFromURL(sourceURL *url.URL, sourceCtx *types.SystemContext) (re
 	return repoDesc, nil
 }
 
+type imageCollectChannel struct {
+	repoDesc repoDescriptor
+	err error
+}
+
+func registryCollectTagsForImage(imageName string, server string, tags []string, serverCtx *types.SystemContext, iCC chan imageCollectChannel) {
+	repoName := fmt.Sprintf("//%s", path.Join(server, imageName))
+	logrus.WithFields(logrus.Fields{
+		"repo":     imageName,
+		"registry": server,
+	}).Info("Processing repo")
+
+	var err error
+
+	var sourceReferences []types.ImageReference
+	for _, tag := range tags {
+		source := fmt.Sprintf("%s:%s", repoName, tag)
+
+		imageRef, err := docker.ParseReference(source)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"tag": source,
+			}).Error("Error processing tag, skipping")
+			logrus.Errorf("Error getting image reference: %s", err)
+			continue
+		}
+		sourceReferences = append(sourceReferences, imageRef)
+	}
+
+	if len(tags) == 0 {
+		logrus.WithFields(logrus.Fields{
+			"repo":     imageName,
+			"registry": server,
+		}).Info("Querying registry for image tags")
+
+		imageRef, err := docker.ParseReference(repoName)
+		if err != nil {
+			iCC <- imageCollectChannel{
+				repoDescriptor{},
+				err}
+
+			return
+		}
+
+		sourceReferences, err = imagesToCopyFromRegistry(imageRef, repoName, serverCtx)
+		if err != nil {
+			iCC <- imageCollectChannel{
+				repoDescriptor{},
+				err}
+
+			return
+		}
+	}
+
+	if len(sourceReferences) == 0 {
+		logrus.WithFields(logrus.Fields{
+			"repo":     imageName,
+			"registry": server,
+		}).Warnf("No tags to sync found")
+
+		err = errors.New("No tags to sync found")
+	}
+
+	iCC <- imageCollectChannel{
+		repoDescriptor{
+			TaggedImages: sourceReferences,
+			Context:      serverCtx},
+			err}
+}
+
 // Given a yaml file and a source context, returns a list of repository descriptors,
 // each containing a list of tagged image references, to be used as registrySync source.
 func registrySyncFromYaml(yamlFile string, sourceCtx *types.SystemContext) (repoDescList []repoDescriptor, err error) {
+	fmt.Println( "File: ", yamlFile )
 	cfg, err := newSourceConfig(yamlFile)
+
 	if err != nil {
 		return
 	}
+
+	fmt.Println( "Parsed: ", cfg )
 
 	for server, serverCfg := range cfg {
 		if len(serverCfg.Images) == 0 {
@@ -346,13 +426,8 @@ func registrySyncFromYaml(yamlFile string, sourceCtx *types.SystemContext) (repo
 			continue
 		}
 
+		var cs = make([]chan imageCollectChannel, 0, MAX_THREADS)
 		for imageName, tags := range serverCfg.Images {
-			repoName := fmt.Sprintf("//%s", path.Join(server, imageName))
-			logrus.WithFields(logrus.Fields{
-				"repo":     imageName,
-				"registry": server,
-			}).Info("Processing repo")
-
 			serverCtx := sourceCtx
 			// override ctx with per-server options
 			serverCtx.DockerCertPath = serverCfg.CertDir
@@ -361,62 +436,89 @@ func registrySyncFromYaml(yamlFile string, sourceCtx *types.SystemContext) (repo
 			serverCtx.DockerInsecureSkipTLSVerify = types.NewOptionalBool(serverCfg.TLSVerify.skip)
 			serverCtx.DockerAuthConfig = &serverCfg.Credentials
 
-			var sourceReferences []types.ImageReference
-			for _, tag := range tags {
-				source := fmt.Sprintf("%s:%s", repoName, tag)
+			cs = append(cs, make(chan imageCollectChannel))
 
-				imageRef, err := docker.ParseReference(source)
-				if err != nil {
-					logrus.WithFields(logrus.Fields{
-						"tag": source,
-					}).Error("Error processing tag, skipping")
-					logrus.Errorf("Error getting image reference: %s", err)
-					continue
-				}
-				sourceReferences = append(sourceReferences, imageRef)
-			}
+			go registryCollectTagsForImage(imageName, server, tags, serverCtx, cs[ len(cs) - 1])
 
-			if len(tags) == 0 {
-				logrus.WithFields(logrus.Fields{
-					"repo":     imageName,
-					"registry": server,
-				}).Info("Querying registry for image tags")
+			for cap( cs ) == len( cs ) {
+				time.Sleep(10 * time.Millisecond)
 
-				imageRef, err := docker.ParseReference(repoName)
-				if err != nil {
-					logrus.WithFields(logrus.Fields{
-						"repo":     imageName,
-						"registry": server,
-					}).Error("Error processing repo, skipping")
-					logrus.Error(err)
-					continue
-				}
+				for i := 0; i < len( cs ); i += 1 {
+					select {
+					case iCC := <-cs[ i ]:
+						cs[ i ] = cs[ len( cs ) - 1 ]
+						cs = cs[ :len( cs ) -1 ]
+						i -= 1
 
-				sourceReferences, err = imagesToCopyFromRegistry(imageRef, repoName, serverCtx)
-				if err != nil {
-					logrus.WithFields(logrus.Fields{
-						"repo":     imageName,
-						"registry": server,
-					}).Error("Error processing repo, skipping")
-					logrus.Error(err)
-					continue
+						if iCC.err != nil {
+							logrus.WithFields(logrus.Fields{
+								"repo":     imageName,
+								"registry": server,
+							}).Error("Error processing repo, skipping")
+							logrus.Error(err)
+							continue
+						}
+
+						repoDescList = append(repoDescList, iCC.repoDesc)
+					default:
+						continue
+					}
 				}
 			}
-
-			if len(sourceReferences) == 0 {
-				logrus.WithFields(logrus.Fields{
-					"repo":     imageName,
-					"registry": server,
-				}).Warnf("No tags to registrySync found")
-				continue
-			}
-			repoDescList = append(repoDescList, repoDescriptor{
-				TaggedImages: sourceReferences,
-				Context:      serverCtx})
 		}
 	}
 
 	return
+}
+
+type copyImageTagChannel struct {
+	done bool
+	err error
+}
+
+type copyImageTagOptions struct {
+	counter int
+	imageRef types.ImageReference
+	destinationURL *url.URL
+	srcRepo repoDescriptor
+	ctx context.Context
+	policyContext *signature.PolicyContext
+	options copy.Options
+	cITC chan copyImageTagChannel
+}
+
+func copyImageTag(opts copyImageTagOptions) {
+	retryCount := 0
+	Retry: for {
+		destRef, err := buildFinalDestination(opts.imageRef, opts.destinationURL, opts.srcRepo.DirBasePath)
+		if err != nil {
+			opts.cITC <-copyImageTagChannel{ false, err }
+			return
+		}
+
+		logrus.WithFields(logrus.Fields{
+			"from": transports.ImageName(opts.imageRef),
+			"to":   transports.ImageName(destRef),
+		}).Infof("Copying image tag %d/%d", opts.counter+1, len(opts.srcRepo.TaggedImages))
+
+		// copy.Image - this has the uuid of the tag, and is where history will
+		//  need to be add
+		_, err = copy.Image(opts.ctx, opts.policyContext, destRef, opts.imageRef, &opts.options)
+		if err != nil {
+			logrus.Error(errors.WithMessage(err, fmt.Sprintf("Error copying tag '%s'", transports.ImageName(opts.imageRef))))
+
+			fmt.Println( "Retry: ", retryCount )
+			if retryCount < 3 {
+				continue Retry
+			}
+
+			retryCount += 1
+		}
+
+		break
+	}
+
+	opts.cITC <-copyImageTagChannel{ true, nil }
 }
 
 func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
@@ -438,6 +540,8 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	//fmt.Println( "destinationCtx: ", destinationCtx )
+	// destinationCtx:  &{        []  false  false   0 <nil>  false    false false}
 
 	sourceCtx, err := opts.srcImage.newSystemContext()
 	if err != nil {
@@ -483,20 +587,31 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 			SourceCtx:        srcRepo.Context,
 		}
 
+		// I want a pool of "processes" to hand a set of tags in parallel
+		var cs = make([]chan copyImageTagChannel, 0, MAX_THREADS)
+
 		for counter, ref := range srcRepo.TaggedImages {
-			destRef, err := buildFinalDestination(ref, destinationURL, srcRepo.DirBasePath)
-			if err != nil {
-				return err
-			}
+			cs = append(cs, make(chan copyImageTagChannel))
 
-			logrus.WithFields(logrus.Fields{
-				"from": transports.ImageName(ref),
-				"to":   transports.ImageName(destRef),
-			}).Infof("Copying image tag %d/%d", counter+1, len(srcRepo.TaggedImages))
+			options := copyImageTagOptions {counter, ref, destinationURL, srcRepo, ctx, policyContext, options, cs[ len(cs) - 1]}
 
-			_, err = copy.Image(ctx, policyContext, destRef, ref, &options)
-			if err != nil {
-				return errors.WithMessage(err, fmt.Sprintf("Error copying tag '%s'", transports.ImageName(ref)))
+			go copyImageTag(options)
+
+			for cap( cs ) == len( cs ) {
+				time.Sleep(10 * time.Millisecond)
+
+				for i := 0; i < len( cs ); i += 1 {
+					select {
+					case cITC := <-cs[ i ]:
+						cs[ i ] = cs[ len( cs ) - 1 ]
+						cs = cs[ :len( cs ) -1 ]
+						i -= 1
+
+						if cITC.err != nil {}
+					default:
+						continue
+					}
+				}
 			}
 			imgCounter++
 		}

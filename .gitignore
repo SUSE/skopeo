@@ -1,4 +1,5 @@
 *.1
+*.swp
 .gdb_history
 /layers-*
 /skopeo

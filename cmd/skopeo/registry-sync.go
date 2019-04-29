@@ -36,43 +36,12 @@ type registrySyncOptions struct {
 	sourceYaml        bool
 }
 
-/*type repoDescriptor struct {
-	DirBasePath  string // base path when source is 'dir'
-	TaggedImages []types.ImageReference
-	Context      *types.SystemContext
-}
-
-type tlsVerifyConfig struct {
-	skip bool
-}*/
-
 type registryregistrySyncCfg struct {
 	Images      map[string][]string
 	Credentials types.DockerAuthConfig
 	TLSVerify   tlsVerifyConfig `yaml:"tls-verify"`
 	CertDir     string          `yaml:"cert-dir"`
 }
-
-//type sourceCfg map[string]registryregistrySyncCfg
-
-// Custom unmarshaler for tls-verify, so when user does not specify the TLS
-// verify option, then it is ON by default.
-/*func (tls *tlsVerifyConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	var verify bool
-	if err := unmarshal(&verify); err != nil {
-		return err
-	}
-
-	tls.skip = !verify
-
-	return nil
-}*/
-
-// Generates a config structure from a YAML file.
-/*func newSourceConfig(yamlFile string) (cfg sourceCfg, err error) {
-	err = yamlUnmarshal(yamlFile, &cfg)
-	return
-}*/
 
 // Checks if a given transport is supported by the registrySync operation.
 func validregistrySyncTransport(transport types.ImageTransport) bool {
@@ -85,208 +54,6 @@ func validregistrySyncTransport(transport types.ImageTransport) bool {
 
 	return false
 }
-
-// Return a URL object from an input string
-/*func parseURL(urlString string) (*url.URL, error) {
-	var parsedURL *url.URL
-
-	parsedURL, err := url.Parse(urlString)
-	if err != nil {
-		return parsedURL, errors.WithMessage(err, "Error while parsing source")
-	}
-
-	valid := validregistrySyncTransport(transports.Get(parsedURL.Scheme))
-	if !valid {
-		return parsedURL, errors.New("Invalid transport")
-	}
-
-	return parsedURL, nil
-}*/
-
-// Given a tranport and an image name (without the transport), returns an
-// ImageReference.
-/*func getImageReference(transport types.ImageTransport, imgName string) (types.ImageReference, error) {
-	ref, err := transport.ParseReference(imgName)
-	if err != nil {
-		return nil, errors.WithMessage(err, fmt.Sprintf("Cannot obtain a valid image reference from '%s'", imgName))
-	}
-
-	return ref, nil
-}*/
-
-// Given a directory as a URL object, returns its string representation suitable
-// to be used as a filesystem path
-/*func dirPathFromURL(dirURL *url.URL) (string, error) {
-	var dirPath string
-	if dirURL.Scheme != directory.Transport.Name() {
-		return "", fmt.Errorf("Not an dir URL: %v", dirURL)
-	}
-
-	if dirURL.Opaque != "" {
-		// relative dir path, e.g. dir:localdir (without "/" or "//")
-		dirPath = dirURL.Opaque
-	} else {
-		dirPath = path.Join("/", dirURL.Host, dirURL.Path)
-	}
-
-	return dirPath, nil
-}*/
-
-// Builds a destination image reference from a source image reference and
-// a destination URL.
-// Eg:
-// source reference: docker://registry.example.com/library/busybox:stable
-// destination URL: docker://my-registry.local.lan
-// will return
-// docker://my-registry.local.lan/registry.example.com/library/busybox:stable
-//
-// Note: when the source is a local directory, trimDirPath is trimmed from the
-// source directory path, so that the destination scope is limited to what's inside
-// host.
-// Eg:
-// source reference: dir:/home/user/registrySyncfolder/registry.example.com/library/busybox:stable
-// destination URL: docker://my-registry.local.lan
-// will return
-// docker://my-registry.local.lan/registry.example.com/library/busybox:stable
-/*func buildFinalDestination(srcRef types.ImageReference, destURL *url.URL, trimDirPath string) (types.ImageReference, error) {
-	var destPath string
-	var finalDest string
-
-	switch srcRef.Transport() {
-	case docker.Transport:
-		// docker -> dir or docker -> docker
-		destPath = srcRef.DockerReference().String()
-	case directory.Transport:
-		// dir -> docker (we don't allow `dir` -> `dir` registrySync operations)
-		destPath = strings.TrimPrefix(srcRef.StringWithinTransport(), trimDirPath)
-		// if source is a full path to an image, have destPath scoped to repo:tag
-		if destPath == "" {
-			destPath = path.Base(trimDirPath)
-		}
-	}
-
-	destTransport := transports.Get(destURL.Scheme)
-	switch destTransport {
-	case docker.Transport:
-		finalDest = fmt.Sprintf("//%s", path.Join(destURL.Host, destURL.Path, destPath))
-	case directory.Transport:
-		basePath, err := dirPathFromURL(destURL)
-		if err != nil {
-			return nil, errors.WithMessage(err, "Error processing destination URL")
-		}
-		finalDest = path.Join(basePath, destPath)
-
-		logrus.Debugf("Creating dir path: %s", finalDest)
-		// the final directory holding the image must exist otherwise
-		// the directory ImageReference instance won't be created
-		if _, err := os.Stat(finalDest); err != nil {
-			if os.IsNotExist(err) {
-				if err := os.MkdirAll(finalDest, 0755); err != nil {
-					return nil, errors.WithMessage(err, fmt.Sprintf("Error creating directory for image %s",
-						finalDest))
-				}
-			} else {
-				return nil, errors.WithMessage(err, fmt.Sprintf("Error checking existence of directory %s",
-					finalDest))
-			}
-		}
-	}
-	logrus.Debugf("Final destination: %s", finalDest)
-
-	destRef, err := getImageReference(destTransport, finalDest)
-	if err != nil {
-		return nil, err
-	}
-
-	return destRef, nil
-}*/
-
-// Retrieves all the tags associated to an image stored on a container registry.
-/*func getImageTags(ctx context.Context, sysCtx *types.SystemContext, imgRef types.ImageReference) ([]string, error) {
-	name := imgRef.DockerReference().Name()
-	logrus.WithFields(logrus.Fields{
-		"image": name,
-	}).Info("Getting tags")
-	tags, err := docker.GetRepositoryTags(ctx, sysCtx, imgRef)
-
-	if err != nil {
-		// Some registries may decide to block the "list all tags" endpoint.
-		// Gracefully allow the registrySync to continue in this case.
-		if !strings.Contains(err.Error(), "401") {
-			return tags, errors.WithMessage(err, fmt.Sprintf("Error determining repository tags for image %s", name))
-		}
-		logrus.Warnf("Registry disallows tag list retrieval: %s", err)
-	}
-
-	return tags, nil
-}*/
-
-// Checks if an image name name includes a tag.
-/*func isTagSpecified(imageName string) (bool, error) {
-	normNamed, err := reference.ParseNormalizedNamed(imageName)
-	if err != nil {
-		return false, err
-	}
-
-	tagged := !reference.IsNameOnly(normNamed)
-	logrus.WithFields(logrus.Fields{
-		"imagename": imageName,
-		"tagged":    tagged,
-	}).Info("Tag presence check")
-	return tagged, nil
-}*/
-
-// Given an image reference on a container registry, returns a list of image
-// references, one for each of the tags available for the given input image.
-/*func imagesToCopyFromRegistry(srcRef types.ImageReference, src string, sourceCtx *types.SystemContext) (sourceReferences []types.ImageReference, retErr error) {
-	tags, err := getImageTags(context.Background(), sourceCtx, srcRef)
-	if err != nil {
-		return []types.ImageReference{}, err
-	}
-	for _, tag := range tags {
-		imageAndTag := fmt.Sprintf("%s:%s", src, tag)
-		ref, err := getImageReference(docker.Transport, imageAndTag)
-		if err != nil {
-			return []types.ImageReference{},
-				errors.WithMessage(err, fmt.Sprintf("Error while building reference of %s", imageAndTag))
-		}
-		sourceReferences = append(sourceReferences, ref)
-	}
-	return sourceReferences, retErr
-}*/
-
-// Given an image reference as a local directory, returns all the image
-// references available at the given path.
-/*func imagesToCopyFromDir(dirPath string) (sourceReferences []types.ImageReference, retErr error) {
-
-	if _, err := os.Stat(dirPath); err != nil {
-		return []types.ImageReference{},
-			errors.WithMessage(err, fmt.Sprintf("Error checking for images in source path %q", dirPath))
-	}
-
-	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() && info.Name() == "manifest.json" {
-			ref, err := getImageReference(directory.Transport, fmt.Sprintf("%s", filepath.Dir(path)))
-			if err != nil {
-				return errors.WithMessage(err, fmt.Sprintf("Error while creating image referenced for path %s",
-					filepath.Dir(path)))
-			}
-			sourceReferences = append(sourceReferences, ref)
-			return filepath.SkipDir
-		}
-		return nil
-	})
-
-	if err != nil {
-		return []types.ImageReference{},
-			errors.WithMessage(err, fmt.Sprintf("Error walking the path %q", dirPath))
-	}
-
-	return
-}*/
 
 // Given a source URL and context, returns a list of tagged image references to
 // be used as registrySync source.
@@ -540,6 +307,7 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+
 	//fmt.Println( "destinationCtx: ", destinationCtx )
 	// destinationCtx:  &{        []  false  false   0 <nil>  false    false false}
 
@@ -564,7 +332,7 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 
 		if transports.Get(sourceURL.Scheme) == directory.Transport &&
 			sourceURL.Scheme == destinationURL.Scheme {
-			return errors.New("registrySync from 'dir:' to 'dir:' not implemented, use something like rregistrySync instead")
+			return errors.New("registry-sync from 'dir:' to 'dir:' not implemented, use something like rregistrySync instead")
 		}
 
 		srcRepo, err := registrySyncFromURL(sourceURL, sourceCtx)
@@ -617,7 +385,7 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 		}
 	}
 
-	logrus.Infof("registrySynced %d images from %d sources", imgCounter, len(srcRepoList))
+	logrus.Infof("registry-synced %d images from %d sources", imgCounter, len(srcRepoList))
 
 	return nil
 }
@@ -658,13 +426,13 @@ func registrySyncCmd(global *globalOptions) cli.Command {
 	destFlags = filterFlags(destFlags, "dest-")
 
 	return cli.Command{
-		Name:  "registrySync",
-		Usage: "registrySync one or more images from one location to another",
+		Name:  "registry-sync",
+		Usage: "registry-sync one or more images from one location to another",
 		Description: fmt.Sprint(`
 
 	Copy all the images from SOURCE to DESTINATION.
 
-	Useful to keep in registrySync a local container registry mirror. Can be used
+	Useful to keep in sync a local container registry mirror. Can be used
 	to populate also registries running inside of air-gapped environments.
 
 	SOURCE can be either a repository hosted on a container registry
@@ -675,8 +443,8 @@ func registrySyncCmd(global *globalOptions) cli.Command {
 	a list of source images from different container registries
 	(local directories are not supported).
 
-	When registrySyncing from a repository where and no tags are specified, skopeo
-	registrySync will copy all the tags contained in that repository.
+	When syncing from a repository where no tags are specified, skopeo
+	registry-sync will copy all the tags contained in that repository.
 
 	DESTINATION can be either a container registry
 	(eg: docker://my-registry.local.lan) or a local directory

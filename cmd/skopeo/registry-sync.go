@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	//"path/filepath"
 	"strings"
 	"runtime"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"github.com/containers/image/copy"
 	"github.com/containers/image/directory"
 	"github.com/containers/image/docker"
-	//"github.com/containers/image/docker/reference"
 	"github.com/containers/image/transports"
 	"github.com/containers/image/types"
 	"github.com/containers/image/signature"
@@ -25,7 +23,7 @@ import (
 	"github.com/urfave/cli"
 )
 
-var MAX_THREADS int = int( math.Min(float64(runtime.NumCPU()), 4.0))
+var MAX_THREADS int = int(math.Min(float64(runtime.NumCPU()), 4.0))
 
 type registrySyncOptions struct {
 	global            *globalOptions
@@ -34,13 +32,6 @@ type registrySyncOptions struct {
 	removeSignatures  bool   // Do not copy signatures from the source image
 	signByFingerprint string // Sign the image using a GPG key with the specified fingerprint
 	sourceYaml        bool
-}
-
-type registryregistrySyncCfg struct {
-	Images      map[string][]string
-	Credentials types.DockerAuthConfig
-	TLSVerify   tlsVerifyConfig `yaml:"tls-verify"`
-	CertDir     string          `yaml:"cert-dir"`
 }
 
 // Checks if a given transport is supported by the registrySync operation.
@@ -176,7 +167,6 @@ func registryCollectTagsForImage(imageName string, server string, tags []string,
 // Given a yaml file and a source context, returns a list of repository descriptors,
 // each containing a list of tagged image references, to be used as registrySync source.
 func registrySyncFromYaml(yamlFile string, sourceCtx *types.SystemContext) (repoDescList []repoDescriptor, err error) {
-	fmt.Println( "File: ", yamlFile )
 	cfg, err := newSourceConfig(yamlFile)
 
 	if err != nil {
@@ -269,23 +259,21 @@ func copyImageTag(opts copyImageTagOptions) {
 		}).Infof("Copying image tag %d/%d", opts.counter+1, len(opts.srcRepo.TaggedImages))
 
 		// copy.Image - this has the uuid of the tag, and is where history will
-		//  need to be add
+		//  need to be add if needed
 		_, err = copy.Image(opts.ctx, opts.policyContext, destRef, opts.imageRef, &opts.options)
 		if err != nil {
-			logrus.Error(errors.WithMessage(err, fmt.Sprintf("Error copying tag '%s'", transports.ImageName(opts.imageRef))))
+			logrus.Error(errors.WithMessage(err, fmt.Sprintf("Error copying tag '%s'; Try: %d", transports.ImageName(opts.imageRef), retryCount + 1)))
 
-			fmt.Println( "Retry: ", retryCount )
 			if retryCount < 3 {
+				retryCount += 1
 				continue Retry
 			}
-
-			retryCount += 1
 		}
 
 		break
 	}
 
-	opts.cITC <-copyImageTagChannel{ true, nil }
+	opts.cITC <-copyImageTagChannel{true, nil}
 }
 
 func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
@@ -345,6 +333,9 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 	ctx, cancel := opts.global.commandTimeoutContext()
 	defer cancel()
 
+	// I want a pool of "processes" to handle a set of tags in parallel
+	var cs = make([]chan copyImageTagChannel, 0, MAX_THREADS)
+
 	var imgCounter int
 	for _, srcRepo := range srcRepoList {
 		options := copy.Options{
@@ -355,11 +346,12 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 			SourceCtx:        srcRepo.Context,
 		}
 
-		// I want a pool of "processes" to hand a set of tags in parallel
-		var cs = make([]chan copyImageTagChannel, 0, MAX_THREADS)
+		fmt.Println( "copy.Options: ", options )
 
 		for counter, ref := range srcRepo.TaggedImages {
 			cs = append(cs, make(chan copyImageTagChannel))
+
+			fmt.Println( "TaggedImages: ", ref )
 
 			options := copyImageTagOptions {counter, ref, destinationURL, srcRepo, ctx, policyContext, options, cs[ len(cs) - 1]}
 
@@ -370,7 +362,7 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 
 				for i := 0; i < len( cs ); i += 1 {
 					select {
-					case cITC := <-cs[ i ]:
+					case cITC := <-cs[ i ]: // TODO: need to handle errors
 						cs[ i ] = cs[ len( cs ) - 1 ]
 						cs = cs[ :len( cs ) -1 ]
 						i -= 1

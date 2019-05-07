@@ -23,7 +23,7 @@ import (
 	"github.com/urfave/cli"
 )
 
-var MAX_THREADS int = int(math.Min(float64(runtime.NumCPU()), 4.0))
+var MAX_THREADS int = int(math.Min(float64(runtime.NumCPU()), 6.0))
 
 type registrySyncOptions struct {
 	global            *globalOptions
@@ -164,6 +164,14 @@ func registryCollectTagsForImage(imageName string, server string, tags []string,
 			err}
 }
 
+func fileExists(filename string) bool {
+  info, err := os.Stat(filename)
+  if os.IsNotExist(err) {
+      return false
+  }
+  return !info.IsDir()
+}
+
 // Given a yaml file and a source context, returns a list of repository descriptors,
 // each containing a list of tagged image references, to be used as registrySync source.
 func registrySyncFromYaml(yamlFile string, sourceCtx *types.SystemContext) (repoDescList []repoDescriptor, err error) {
@@ -172,8 +180,6 @@ func registrySyncFromYaml(yamlFile string, sourceCtx *types.SystemContext) (repo
 	if err != nil {
 		return
 	}
-
-	fmt.Println( "Parsed: ", cfg )
 
 	for server, serverCfg := range cfg {
 		if len(serverCfg.Images) == 0 {
@@ -209,7 +215,7 @@ func registrySyncFromYaml(yamlFile string, sourceCtx *types.SystemContext) (repo
 
 						if iCC.err != nil {
 							logrus.WithFields(logrus.Fields{
-								"repo":     imageName,
+								"repo":     imageName, //FIXME: This shoud be fields in iCC as this is the last one appended
 								"registry": server,
 							}).Error("Error processing repo, skipping")
 							logrus.Error(err)
@@ -222,6 +228,16 @@ func registrySyncFromYaml(yamlFile string, sourceCtx *types.SystemContext) (repo
 					}
 				}
 			}
+		}
+
+		for i := 0; i < len( cs ); i += 1 {
+			iCC := <-cs[ i ]
+
+			if iCC.err != nil {
+				continue
+			}
+
+			repoDescList = append(repoDescList, iCC.repoDesc)
 		}
 	}
 
@@ -249,8 +265,15 @@ func copyImageTag(opts copyImageTagOptions) {
 	Retry: for {
 		destRef, err := buildFinalDestination(opts.imageRef, opts.destinationURL, opts.srcRepo.DirBasePath)
 		if err != nil {
-			opts.cITC <-copyImageTagChannel{ false, err }
+			opts.cITC <-copyImageTagChannel{false, err}
 			return
+		}
+
+		destIN := transports.ImageName( destRef )
+
+		if destIN[:3] == "dir" && fileExists( destIN[4:] + "/manifest.json" ) {
+			logrus.Infof( "'%s' already exists so skipping, next step test and compare digests", destIN[4:] + "/manifest.json" )
+			break
 		}
 
 		logrus.WithFields(logrus.Fields{
@@ -295,9 +318,6 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-
-	//fmt.Println( "destinationCtx: ", destinationCtx )
-	// destinationCtx:  &{        []  false  false   0 <nil>  false    false false}
 
 	sourceCtx, err := opts.srcImage.newSystemContext()
 	if err != nil {
@@ -346,12 +366,8 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 			SourceCtx:        srcRepo.Context,
 		}
 
-		fmt.Println( "copy.Options: ", options )
-
 		for counter, ref := range srcRepo.TaggedImages {
 			cs = append(cs, make(chan copyImageTagChannel))
-
-			fmt.Println( "TaggedImages: ", ref )
 
 			options := copyImageTagOptions {counter, ref, destinationURL, srcRepo, ctx, policyContext, options, cs[ len(cs) - 1]}
 
@@ -374,6 +390,17 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 				}
 			}
 			imgCounter++
+		}
+
+
+		// Drop Channels to 0 before continuing
+		for i := 0; i < len( cs ); i += 1 {
+			cITC := <-cs[ i ]
+			cs[ i ] = cs[ len( cs ) - 1 ]
+			cs = cs[ :len( cs ) -1 ]
+			i -= 1
+
+			if cITC.err != nil {}
 		}
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	//"io/ioutil"
 	"net/url"
 	"os"
 	"path"
@@ -11,10 +12,12 @@ import (
 	"runtime"
 	"time"
 	"math"
+	"encoding/json"
 
 	"github.com/containers/image/copy"
 	"github.com/containers/image/directory"
 	"github.com/containers/image/docker"
+//	"github.com/containers/image/manifest"
 	"github.com/containers/image/transports"
 	"github.com/containers/image/types"
 	"github.com/containers/image/signature"
@@ -251,13 +254,28 @@ type copyImageTagChannel struct {
 
 type copyImageTagOptions struct {
 	counter int
+	global *globalOptions
 	imageRef types.ImageReference
 	destinationURL *url.URL
+	srcImageOpts *imageOptions
 	srcRepo repoDescriptor
 	ctx context.Context
 	policyContext *signature.PolicyContext
 	options copy.Options
 	cITC chan copyImageTagChannel
+}
+
+type registrySyncManifestConfig struct {
+		MediaType string
+		Size int
+		Digest string
+}
+
+type registrySyncManifest struct {
+	SchemaVersion int
+	MediaType string
+	Config registrySyncManifestConfig
+	Layers []registrySyncManifestConfig
 }
 
 func copyImageTag(opts copyImageTagOptions) {
@@ -272,8 +290,67 @@ func copyImageTag(opts copyImageTagOptions) {
 		destIN := transports.ImageName( destRef )
 
 		if destIN[:3] == "dir" && fileExists( destIN[4:] + "/manifest.json" ) {
-			logrus.Infof( "'%s' already exists so skipping, next step test and compare digests", destIN[4:] + "/manifest.json" )
-			break
+			logrus.Infof( "'%s' already exists test and compare digests", destIN[4:] + "/manifest.json" )
+			ctx, cancel := opts.global.commandTimeoutContext()
+			defer cancel()
+
+			img, err := parseImage( ctx, opts.srcImageOpts,transports.ImageName(opts.imageRef) )
+			if err != nil {
+				logrus.Error( err )
+				break
+			}
+
+			defer func() {
+				if lerr := img.Close(); lerr != nil {
+					err = errors.Wrapf(lerr, fmt.Sprintf("(could not close image: %v) ", err))
+				}
+			}()
+
+			imgInspect, err := img.Inspect(ctx)
+			if err != nil {
+				logrus.Error( err )
+				break
+			}
+
+			if len( imgInspect.Layers ) == 0 {
+				break
+			}
+
+			jsonFile, err := os.Open( destIN[4:] + "/manifest.json" )
+			if err != nil {
+				logrus.Error( err )
+				break
+			}
+
+			defer jsonFile.Close()
+
+			var localManifest registrySyncManifest
+
+			jsonParser := json.NewDecoder( jsonFile )
+			jsonParser.Decode( &localManifest )
+
+			changed := false
+			if len( localManifest.Layers ) == len( imgInspect.Layers ) {
+				logrus.Warnln( "Layer count matches, need to test each" )
+
+				num_found := 0
+				for _, layer := range localManifest.Layers {
+					for _, layerDigest := range imgInspect.Layers {
+						if layer.Digest == layerDigest {
+							num_found += 1
+							break
+						}
+					}
+				}
+
+				if num_found != len( localManifest.Layers ) {
+					changed = true
+				}
+			}
+
+			if ! changed {
+				break
+			}
 		}
 
 		logrus.WithFields(logrus.Fields{
@@ -340,7 +417,7 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 
 		if transports.Get(sourceURL.Scheme) == directory.Transport &&
 			sourceURL.Scheme == destinationURL.Scheme {
-			return errors.New("registry-sync from 'dir:' to 'dir:' not implemented, use something like rregistrySync instead")
+			return errors.New("registry-sync from 'dir:' to 'dir:' not implemented, use something like rsync instead")
 		}
 
 		srcRepo, err := registrySyncFromURL(sourceURL, sourceCtx)
@@ -366,10 +443,12 @@ func (opts *registrySyncOptions) run(args []string, stdout io.Writer) error {
 			SourceCtx:        srcRepo.Context,
 		}
 
+		opts.srcImage.credsOption.present = true
+		opts.srcImage.credsOption.value = srcRepo.Context.DockerAuthConfig.Username + ":" + srcRepo.Context.DockerAuthConfig.Password
+
 		for counter, ref := range srcRepo.TaggedImages {
 			cs = append(cs, make(chan copyImageTagChannel))
-
-			options := copyImageTagOptions {counter, ref, destinationURL, srcRepo, ctx, policyContext, options, cs[ len(cs) - 1]}
+			options := copyImageTagOptions {counter, opts.global, ref, destinationURL, opts.srcImage, srcRepo, ctx, policyContext, options, cs[ len(cs) - 1]}
 
 			go copyImageTag(options)
 

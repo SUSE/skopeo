@@ -278,6 +278,31 @@ type registrySyncManifest struct {
 	Layers []registrySyncManifestConfig
 }
 
+func imageFetchManifest( opts copyImageTagOptions ) ( *types.ImageInspectInfo, error ) {
+	ctx, cancel := opts.global.commandTimeoutContext()
+	defer cancel()
+
+	var imgInspect *types.ImageInspectInfo
+
+	img, err := parseImage( ctx, opts.srcImageOpts, transports.ImageName( opts.imageRef ) )
+	if err != nil {
+		return imgInspect, err
+	}
+
+	defer func() {
+		if lerr := img.Close(); lerr != nil {
+			err = errors.Wrapf( lerr, fmt.Sprintf( "(could not close image: %v) ", err ) )
+		}
+	}()
+
+	imgInspect, err = img.Inspect( ctx )
+	if err != nil {
+		return imgInspect, err
+	}
+
+	return imgInspect, err
+}
+
 func copyImageTag(opts copyImageTagOptions) {
 	retryCount := 0
 	Retry: for {
@@ -287,30 +312,17 @@ func copyImageTag(opts copyImageTagOptions) {
 			return
 		}
 
+		imgInspect, err := imageFetchManifest( opts )
+
+		if err != nil {
+			logrus.Error( err )
+			break
+		}
+
 		destIN := transports.ImageName( destRef )
 
 		if destIN[:3] == "dir" && fileExists( destIN[4:] + "/manifest.json" ) {
 			logrus.Infof( "'%s' already exists test and compare digests", destIN[4:] + "/manifest.json" )
-			ctx, cancel := opts.global.commandTimeoutContext()
-			defer cancel()
-
-			img, err := parseImage( ctx, opts.srcImageOpts,transports.ImageName(opts.imageRef) )
-			if err != nil {
-				logrus.Error( err )
-				break
-			}
-
-			defer func() {
-				if lerr := img.Close(); lerr != nil {
-					err = errors.Wrapf(lerr, fmt.Sprintf("(could not close image: %v) ", err))
-				}
-			}()
-
-			imgInspect, err := img.Inspect(ctx)
-			if err != nil {
-				logrus.Error( err )
-				break
-			}
 
 			if len( imgInspect.Layers ) == 0 {
 				break
@@ -353,13 +365,18 @@ func copyImageTag(opts copyImageTagOptions) {
 			}
 		}
 
+		if len( opts.global.overrideArch ) > 0 && len( imgInspect.Architecture ) > 0 {
+			if opts.global.overrideArch != imgInspect.Architecture {
+				// if we are not operating on the correct Architecture do no make a copy
+				break
+			}
+		}
+
 		logrus.WithFields(logrus.Fields{
 			"from": transports.ImageName(opts.imageRef),
 			"to":   transports.ImageName(destRef),
 		}).Infof("Copying image tag %d/%d", opts.counter+1, len(opts.srcRepo.TaggedImages))
 
-		// copy.Image - this has the uuid of the tag, and is where history will
-		//  need to be add if needed
 		_, err = copy.Image(opts.ctx, opts.policyContext, destRef, opts.imageRef, &opts.options)
 		if err != nil {
 			logrus.Error(errors.WithMessage(err, fmt.Sprintf("Error copying tag '%s'; Try: %d", transports.ImageName(opts.imageRef), retryCount + 1)))
@@ -492,7 +509,8 @@ func registrySyncCmd(global *globalOptions) cli.Command {
 	sharedFlags, sharedOpts := sharedImageFlags()
 	srcFlags, srcOpts := imageFlags(global, sharedOpts, "src-", "screds")
 	destFlags, destOpts := imageDestFlags(global, sharedOpts, "dest-", "dcreds")
-	opts := registrySyncOptions{global: global,
+	opts := registrySyncOptions{
+		global:    global,
 		srcImage:  srcOpts,
 		destImage: destOpts,
 	}

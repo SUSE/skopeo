@@ -369,6 +369,8 @@ func copyImageTag(opts copyImageTagOptions) {
 				break
 			}
 		}
+		
+		os.Remove( destIN[4:] + "/manifest.json" )
 
 		logrus.WithFields(logrus.Fields{
 			"from": transports.ImageName(opts.imageRef),

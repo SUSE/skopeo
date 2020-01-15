@@ -369,8 +369,6 @@ func copyImageTag(opts copyImageTagOptions) {
 				break
 			}
 		}
-		
-		os.RemoveAll( destIN[4:] )
 
 		logrus.WithFields(logrus.Fields{
 			"from": transports.ImageName(opts.imageRef),

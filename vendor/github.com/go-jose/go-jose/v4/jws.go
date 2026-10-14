@@ -270,15 +270,16 @@ func (parsed *rawJSONWebSignature) sanitized(signatureAlgorithms []SignatureAlgo
 			Signature: parsed.Signature,
 		}
 
-		var err error
-		signature.Header, err = signature.mergedHeaders().sanitized()
-		if err != nil {
-			return nil, err
-		}
-
-		alg := SignatureAlgorithm(signature.Header.Algorithm)
+		mergedHeaders := signature.mergedHeaders()
+		alg := mergedHeaders.getSignatureAlgorithm()
 		if !containsSignatureAlgorithm(signatureAlgorithms, alg) {
 			return nil, newErrUnexpectedSignatureAlgorithm(alg, signatureAlgorithms)
+		}
+
+		var err error
+		signature.Header, err = mergedHeaders.sanitized()
+		if err != nil {
+			return nil, err
 		}
 
 		if signature.header != nil {
@@ -318,15 +319,18 @@ func (parsed *rawJSONWebSignature) sanitized(signatureAlgorithms []SignatureAlgo
 			return nil, ErrUnprotectedNonce
 		}
 
-		var err error
-		obj.Signatures[i].Header, err = obj.Signatures[i].mergedHeaders().sanitized()
-		if err != nil {
-			return nil, err
-		}
+		obj.Signatures[i].header = sig.Header
 
-		alg := SignatureAlgorithm(obj.Signatures[i].Header.Algorithm)
+		mergedHeaders := obj.Signatures[i].mergedHeaders()
+		alg := mergedHeaders.getSignatureAlgorithm()
 		if !containsSignatureAlgorithm(signatureAlgorithms, alg) {
 			return nil, newErrUnexpectedSignatureAlgorithm(alg, signatureAlgorithms)
+		}
+
+		var err error
+		obj.Signatures[i].Header, err = mergedHeaders.sanitized()
+		if err != nil {
+			return nil, err
 		}
 
 		if obj.Signatures[i].header != nil {
@@ -354,7 +358,6 @@ func (parsed *rawJSONWebSignature) sanitized(signatureAlgorithms []SignatureAlgo
 		// Copy value of sig
 		original := sig
 
-		obj.Signatures[i].header = sig.Header
 		obj.Signatures[i].original = &original
 	}
 

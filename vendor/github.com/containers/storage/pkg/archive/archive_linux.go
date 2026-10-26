@@ -2,6 +2,7 @@ package archive
 
 import (
 	"archive/tar"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,6 +126,9 @@ func (overlayWhiteoutConverter) ConvertReadWithHandler(hdr *tar.Header, path str
 
 	// if a file was deleted and we are using overlay, we need to create a character device
 	if originalBase, ok := strings.CutPrefix(base, WhiteoutPrefix); ok {
+		if isInvalidWhiteoutTargetBaseName(originalBase) {
+			return false, fmt.Errorf("invalid whiteout path %q", path)
+		}
 		originalPath := filepath.Join(dir, originalBase)
 
 		if err := handler.Mknod(originalPath, unix.S_IFCHR, 0); err != nil {

@@ -99,6 +99,9 @@ func aufsDeletedFile(root, path string, fi os.FileInfo) (string, error) {
 
 	// If there is a whiteout, then the file was removed
 	if originalFile, ok := strings.CutPrefix(f, WhiteoutPrefix); ok {
+		if isInvalidWhiteoutTargetBaseName(originalFile) {
+			return "", fmt.Errorf("invalid whiteout path %q", path)
+		}
 		return filepath.Join(filepath.Dir(path), originalFile), nil
 	}
 

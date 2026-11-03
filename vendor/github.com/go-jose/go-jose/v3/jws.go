@@ -235,6 +235,8 @@ func (parsed *rawJSONWebSignature) sanitized() (*JSONWebSignature, error) {
 			return nil, ErrUnprotectedNonce
 		}
 
+		obj.Signatures[i].header = sig.Header
+
 		var err error
 		obj.Signatures[i].Header, err = obj.Signatures[i].mergedHeaders().sanitized()
 		if err != nil {
@@ -266,7 +268,6 @@ func (parsed *rawJSONWebSignature) sanitized() (*JSONWebSignature, error) {
 		// Copy value of sig
 		original := sig
 
-		obj.Signatures[i].header = sig.Header
 		obj.Signatures[i].original = &original
 	}
 
